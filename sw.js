@@ -1,5 +1,5 @@
 /* 오프라인에서도 앱 화면이 열리도록 파일을 저장해 두는 도우미 */
-const CACHE = 'todo-v1';
+const CACHE = 'todo-v2';
 const CORE = ['./', './index.html', './manifest.webmanifest', './vendor/firebase-app-compat.js', './vendor/firebase-auth-compat.js', './vendor/firebase-firestore-compat.js', './icons/icon-192.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(CORE)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim())); });
