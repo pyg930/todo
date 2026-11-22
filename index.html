@@ -103,6 +103,11 @@ html,body{overflow-x:hidden}
 .legend .bar{width:14px;height:4px;border-radius:2px;background:var(--trip)}
 .gstatus{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;color:var(--muted);flex-wrap:wrap}
 .gstatus.err{color:var(--high)}
+.calpick{margin-top:8px;border:1px solid var(--line);border-radius:10px;padding:6px 10px;background:var(--bg)}
+.calrow{display:flex;align-items:center;gap:8px;padding:6px 0;font-size:14px;cursor:pointer;min-width:0}
+.calrow input{width:18px;height:18px;margin:0;accent-color:var(--accent);flex:none}
+.cdot{flex:none;width:10px;height:10px;border-radius:3px}
+.cname{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* lists */
 .rows{list-style:none;margin:0;padding:0}
@@ -360,7 +365,7 @@ const fdb = firebase.firestore();
 try{ fdb.enablePersistence({ synchronizeTabs: true }).catch(() => {}); }catch(_){}
 
 let REFS = null, UNSUBS = [];
-function normPrefs(o){ o = o || {}; return { excluded: [].concat(o.excluded||[]), included: [].concat(o.included||[]), names: Object.assign({}, o.names||{}), hidden: [].concat(o.hidden||[]), manual: [].concat(o.manual||[]) }; }
+function normPrefs(o){ o = o || {}; return { excluded: [].concat(o.excluded||[]), included: [].concat(o.included||[]), names: Object.assign({}, o.names||{}), hidden: [].concat(o.hidden||[]), manual: [].concat(o.manual||[]), cals: Array.isArray(o.cals) ? o.cals.slice() : null }; }
 function refsFor(uid){
   const base = fdb.collection('users').doc(uid);
   return { tasks: base.collection('tasks'), projects: base.collection('projects'),
@@ -437,14 +442,17 @@ const isHotel = e => !isFlight(e) && RX_HOTEL.test(e.title);
 const isConf = e => RX_CONF.test(e.title);
 const autoTravel = e => isFlight(e) || isHotel(e) || isConf(e);
 const evIcon = e => isFlight(e) ? '✈' : isHotel(e) ? '🏨' : isConf(e) ? '🎓' : '📅';
-function normEvent(e){
+function normEvent(e, cal){
   if(!e || !e.id || e.status === 'cancelled' || !e.start) return null;
   const allDay = !!e.start.date;
   const s = allDay ? parseYmd(e.start.date) : new Date(e.start.dateTime);
   const en = allDay ? parseYmd((e.end && e.end.date) || e.start.date) : new Date((e.end && e.end.dateTime) || e.start.dateTime);
   if(isNaN(s) || isNaN(en)) return null;
-  return { id: e.id, title: String(e.summary || '(제목 없음)').trim(), location: e.location || '', allDay,
-    long: !allDay && (en - s) >= 20*3600000, start: s, end: en < s ? s : en, link: e.htmlLink || '', type: e.eventType || 'DEFAULT' };
+  /* 내 기본 캘린더 일정은 원래 id 그대로 (여행 이름 등 저장된 설정이 이어지도록), 공유받은 캘린더는 캘린더 id를 붙여 구분 */
+  const id = (!cal || cal.primary) ? e.id : e.id + '|' + cal.id;
+  return { id, title: String(e.summary || '(제목 없음)').trim(), location: e.location || '', allDay,
+    long: !allDay && (en - s) >= 20*3600000, start: s, end: en < s ? s : en, link: e.htmlLink || '', type: e.eventType || 'DEFAULT',
+    calId: cal ? cal.id : '', calName: cal ? cal.name : '', uid: e.iCalUID || '' };
 }
 function evFirst(e){ return ymd(e.start); }
 function evLast(e){ const l = ymd(new Date(Math.max(e.end.getTime()-1, e.start.getTime()))); return l < evFirst(e) ? evFirst(e) : l; }
@@ -460,6 +468,7 @@ function saveEvCache(){
   try{ localStorage.setItem(EVC_KEY, JSON.stringify([...S.gcal.events.values()].map(e => Object.assign({}, e, { start: e.start.getTime(), end: e.end.getTime() })))); }catch(_){}
 }
 function loadEvCache(){
+  try{ const c = JSON.parse(localStorage.getItem('gcal.cals.v1')); if(Array.isArray(c)) S.gcal.cals = c; }catch(_){}
   try{ const a = JSON.parse(localStorage.getItem(EVC_KEY)); if(Array.isArray(a)) for(const e of a){ if(e && e.id) S.gcal.events.set(e.id, Object.assign({}, e, { start: new Date(e.start), end: new Date(e.end) })); } }catch(_){}
 }
 function calProvider(){ const p = new firebase.auth.GoogleAuthProvider(); p.addScope(CAL_SCOPE); p.setCustomParameters({ prompt: 'select_account' }); return p; }
@@ -500,14 +509,40 @@ function startCalendar(){
   if(!tokOk()){ S.gcal.status = 'error'; S.gcal.code = 'needs_token'; renderAll(); return; }
   if(!gRanges.length){ const r = baseRange(); queueFetch(r[0], r[1]); }
 }
-async function gcalPage(a, b, pageToken){
-  const u = new URL('https://www.googleapis.com/calendar/v3/calendars/primary/events');
+async function gcalPage(a, b, pageToken, calId){
+  const u = new URL('https://www.googleapis.com/calendar/v3/calendars/' + encodeURIComponent(calId || 'primary') + '/events');
   u.searchParams.set('timeMin', parseYmd(a).toISOString());
   u.searchParams.set('timeMax', parseYmd(b).toISOString());
   u.searchParams.set('singleEvents', 'true');
   u.searchParams.set('orderBy', 'startTime');
   u.searchParams.set('maxResults', '250');
   if(pageToken) u.searchParams.set('pageToken', pageToken);
+  return gcalGet(u);
+}
+/* 내 계정에서 볼 수 있는 캘린더 목록 (내 캘린더 + 공유받은 캘린더) */
+async function loadCals(){
+  const u = new URL('https://www.googleapis.com/calendar/v3/users/me/calendarList');
+  u.searchParams.set('minAccessRole', 'reader');
+  u.searchParams.set('maxResults', '250');
+  const p = await gcalGet(u);
+  const items = Array.isArray(p.items) ? p.items : [];
+  S.gcal.cals = items.filter(c => c && c.id && !c.deleted).map(c => ({ id: c.id, name: String(c.summaryOverride || c.summary || c.id), primary: !!c.primary, selected: !!c.selected, color: c.backgroundColor || '' }))
+    .sort((x, y) => (y.primary - x.primary) || x.name.localeCompare(y.name));
+  try{ localStorage.setItem('gcal.cals.v1', JSON.stringify(S.gcal.cals)); }catch(_){}
+}
+const AUTO_SKIP = /#holiday@|#contacts@|#weather@|addressbook#/;
+function activeCals(){
+  const cals = S.gcal.cals || [];
+  if(Array.isArray(S.prefs.cals)){ const want = new Set(S.prefs.cals); return cals.filter(c => want.has(c.id)); }
+  return cals.filter(c => c.primary || (c.selected && !AUTO_SKIP.test(c.id)));
+}
+function setCalOn(cal, on){
+  const now = activeCals().map(c => c.id).filter(id => id !== cal.id);
+  if(on) now.push(cal.id);
+  savePrefs(p => { p.cals = now; });
+  if(on && tokOk()) refreshGcal();
+}
+async function gcalGet(u){
   let r;
   try{ r = await fetch(u, { headers: { Authorization: 'Bearer ' + GC.token } }); }
   catch(_){ throw { code: 'server_unavailable', retryable: true }; }
@@ -531,14 +566,32 @@ async function fetchRange(a, b, refresh, retried){
   if(!tokOk()){ S.gcal.status = 'error'; S.gcal.code = 'needs_token'; renderAll(); return; }
   S.gcal.busy = true; if(S.gcal.status !== 'ok') S.gcal.status = 'loading'; renderAll();
   try{
-    const list = []; let token = null, n = 0;
-    do{
-      const p = await gcalPage(a, b, token);
-      if(Array.isArray(p.items)) list.push(...p.items);
-      token = p.nextPageToken; n++;
-    } while(token && n < 6);
+    if(!S.gcal.cals || refresh) await loadCals();
+    const cals = activeCals();
+    const got = [];
+    for(const cal of cals){
+      let token = null, n = 0;
+      try{
+        do{
+          const p = await gcalPage(a, b, token, cal.id);
+          if(Array.isArray(p.items)) for(const raw of p.items){ const e = normEvent(raw, cal); if(e) got.push(e); }
+          token = p.nextPageToken; n++;
+        } while(token && n < 6);
+      }catch(err){
+        /* 공유가 끊긴 캘린더 하나 때문에 전체가 멈추지 않도록 건너뛰어요 */
+        if(err && err.code === 'tool_error' && !cal.primary) continue;
+        throw err;
+      }
+    }
     for(const [id, e] of S.gcal.events) if(evFirst(e) >= a && evFirst(e) < b) S.gcal.events.delete(id);
-    for(const raw of list){ const e = normEvent(raw); if(e) S.gcal.events.set(e.id, e); }
+    /* 두 계정에 같은 초대가 들어 있으면 한 번만 보여줘요 (내 캘린더 쪽을 남김) */
+    const seen = new Set();
+    for(const e of got){
+      const k = e.uid ? e.uid + '@' + e.start.getTime() : '';
+      if(k && seen.has(k)) continue;
+      if(k) seen.add(k);
+      S.gcal.events.set(e.id, e);
+    }
     if(!gRanges.some(r => r[0] === a && r[1] === b)) gRanges.push([a, b]);
     S.gcal.status = 'ok'; S.gcal.code = null;
     saveEvCache();
@@ -586,7 +639,18 @@ function gcalStatusEl(){
       refreshGcal();
     } }, g.busy ? '불러오는 중…' : label);
   }
-  return h('div', { class: 'gstatus' + (err ? ' err' : '') }, h('span', null, gcalMsg()), btn);
+  const cals = S.gcal.cals || [];
+  const pickBtn = cals.length > 1 ? h('button', { class: 'btn-text small', type: 'button', 'aria-expanded': String(!!S.showCals),
+    onclick: () => { S.showCals = !S.showCals; renderAll(); } }, S.showCals ? '캘린더 고르기 닫기' : '캘린더 고르기') : null;
+  let picker = null;
+  if(S.showCals && cals.length){
+    const on = new Set(activeCals().map(c => c.id));
+    picker = h('div', { class: 'calpick' }, cals.map(c => h('label', { class: 'calrow' },
+      h('input', { type: 'checkbox', checked: on.has(c.id), onchange: e => setCalOn(c, e.target.checked) }),
+      h('span', { class: 'cdot', style: 'background:' + (c.color || 'var(--event)') }),
+      h('span', { class: 'cname' }, c.name + (c.primary ? ' (내 캘린더)' : '')))));
+  }
+  return h('div', null, h('div', { class: 'gstatus' + (err ? ' err' : '') }, h('span', null, gcalMsg()), btn, pickBtn), picker);
 }
 
 /* ---------- dedupe + trips ---------- */
@@ -594,7 +658,8 @@ function flightNo(t){ const m = t.match(/\b([A-Z]{2}|[A-Z]\d|\d[A-Z])\s?(\d{2,4}
 const rank = e => e.type === 'FROM_GMAIL' ? 1 : 0;
 const hotelNorm = t => t.toLowerCase().replace(/stay at|reservation at|check-?in|체크인/g, '').replace(/\s+/g, ' ').trim();
 function visibleEvents(){
-  const evs = [...S.gcal.events.values()].sort((a,b) => a.start - b.start);
+  const act = S.gcal.cals ? new Set(activeCals().map(c => c.id)) : null;
+  const evs = [...S.gcal.events.values()].filter(e => !act || !e.calId || act.has(e.calId)).sort((a,b) => a.start - b.start);
   const hide = new Set(), byKey = {};
   for(const e of evs) if(isFlight(e)){ const n = flightNo(e.title); if(n){ const k = n+'|'+evFirst(e); (byKey[k] = byKey[k] || []).push(e); } }
   for(const k in byKey){ const g = byKey[k]; if(g.length > 1){ g.sort((a,b) => rank(a)-rank(b)); g.slice(1).forEach(e => hide.add(e.id)); } }
@@ -737,7 +802,8 @@ async function signIn(){
 }
 function signOutAll(){
   stopDb(); clearTok();
-  try{ localStorage.removeItem(EVC_KEY); }catch(_){}
+  try{ localStorage.removeItem(EVC_KEY); localStorage.removeItem('gcal.cals.v1'); }catch(_){}
+  S.gcal.cals = null; S.showCals = false;
   S.gcal.events.clear(); gRanges = []; S.gcal.status = 'loading'; S.gcal.code = null;
   S.tasks = {}; S.projects = {}; S.braindump = { text: '' }; S.prefs = normPrefs(null);
   auth.signOut();
@@ -1267,6 +1333,7 @@ function renderDay(d){
       (sel.long ? mdLabel(evFirst(sel)) + ' ' + hm(sel.start) + ' – ' + mdLabel(evLast(sel)) + ' ' + hm(sel.end) : hm(sel.start) + ' – ' + hm(sel.end));
     evcard = h('div', { class: 'evcard' },
       h('div', { class: 't' }, sel.title), h('div', { class: 'muted small' }, when), sel.location ? h('div', { class: 'muted small' }, sel.location) : null,
+      (sel.calName && activeCals().length > 1) ? h('div', { class: 'muted small' }, '캘린더: ' + sel.calName) : null,
       h('div', { class: 'acts' },
         h('button', { class: 'btn', type: 'button', onclick: () => setTravel(sel, !tr) }, tr ? '여행에서 빼기' : '여행에 넣기'),
         sel.link ? h('a', { href: sel.link, target: '_blank', rel: 'noopener' }, '구글 캘린더에서 보기') : null,
