@@ -107,6 +107,10 @@ html,body{overflow-x:hidden}
 .calrow{display:flex;align-items:center;gap:8px;padding:6px 0;font-size:14px;cursor:pointer;min-width:0}
 .calrow input{width:18px;height:18px;margin:0;accent-color:var(--accent);flex:none}
 .cdot{flex:none;width:10px;height:10px;border-radius:3px}
+.acct{padding:4px 0 6px;border-bottom:1px solid var(--line)}
+.acct:last-of-type{border-bottom:none}
+.acct-head{display:flex;align-items:center;gap:4px;padding:4px 0 2px}
+.acct-name{flex:1;min-width:0;font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cname{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* lists */
@@ -335,7 +339,7 @@ function toast(msg){ const t = $('#toast'); t.textContent = msg; t.classList.add
 const S = {
   mode: 'loading', tasks: {}, projects: {}, braindump: { text: '' },
   prefs: { excluded: [], included: [], names: {}, hidden: [], manual: [] },
-  gcal: { events: new Map(), status: 'loading', code: null, busy: false },
+  gcal: { events: new Map(), status: 'loading', code: null, busy: false, cals: null, acctErr: {} },
   view: { name: 'main' }, month: null, selected: TODAY(),
   memoTab: 'dump', editTask: null, selEvent: null, tripRef: null,
   addingTrip: false, showAllDue: false, openProj: new Set(), openItems: new Set(), editProj: null, editItem: null,
@@ -365,7 +369,7 @@ const fdb = firebase.firestore();
 try{ fdb.enablePersistence({ synchronizeTabs: true }).catch(() => {}); }catch(_){}
 
 let REFS = null, UNSUBS = [];
-function normPrefs(o){ o = o || {}; return { excluded: [].concat(o.excluded||[]), included: [].concat(o.included||[]), names: Object.assign({}, o.names||{}), hidden: [].concat(o.hidden||[]), manual: [].concat(o.manual||[]), cals: Array.isArray(o.cals) ? o.cals.slice() : null }; }
+function normPrefs(o){ o = o || {}; return { excluded: [].concat(o.excluded||[]), included: [].concat(o.included||[]), names: Object.assign({}, o.names||{}), hidden: [].concat(o.hidden||[]), manual: [].concat(o.manual||[]), cals: Array.isArray(o.cals) ? o.cals.slice() : null, calsSeen: Array.isArray(o.calsSeen) ? o.calsSeen.slice() : null, accounts: [].concat(o.accounts||[]) }; }
 function refsFor(uid){
   const base = fdb.collection('users').doc(uid);
   return { tasks: base.collection('tasks'), projects: base.collection('projects'),
@@ -449,7 +453,7 @@ function normEvent(e, cal){
   const en = allDay ? parseYmd((e.end && e.end.date) || e.start.date) : new Date((e.end && e.end.dateTime) || e.start.dateTime);
   if(isNaN(s) || isNaN(en)) return null;
   /* 내 기본 캘린더 일정은 원래 id 그대로 (여행 이름 등 저장된 설정이 이어지도록), 공유받은 캘린더는 캘린더 id를 붙여 구분 */
-  const id = (!cal || cal.primary) ? e.id : e.id + '|' + cal.id;
+  const id = (!cal || cal.main) ? e.id : e.id + '|' + cal.id;
   return { id, title: String(e.summary || '(제목 없음)').trim(), location: e.location || '', allDay,
     long: !allDay && (en - s) >= 20*3600000, start: s, end: en < s ? s : en, link: e.htmlLink || '', type: e.eventType || 'DEFAULT',
     calId: cal ? cal.id : '', calName: cal ? cal.name : '', uid: e.iCalUID || '' };
@@ -457,59 +461,126 @@ function normEvent(e, cal){
 function evFirst(e){ return ymd(e.start); }
 function evLast(e){ const l = ymd(new Date(Math.max(e.end.getTime()-1, e.start.getTime()))); return l < evFirst(e) ? evFirst(e) : l; }
 function evOn(e, d){ return evFirst(e) <= d && d <= evLast(e); }
-/* ---------- Google Calendar 직접 연결 ---------- */
-const GC = { token: null, exp: 0 };
-const TOK_KEY = 'gcal.token.v1', EVC_KEY = 'gcal.cache.v1';
-function loadTok(){ try{ const o = JSON.parse(localStorage.getItem(TOK_KEY)); if(o && o.token && o.exp > Date.now()){ GC.token = o.token; GC.exp = o.exp; } }catch(_){} }
-function saveTok(token, sec){ GC.token = token; GC.exp = Date.now() + (Number(sec) || 3600) * 1000; try{ localStorage.setItem(TOK_KEY, JSON.stringify({ token, exp: GC.exp })); }catch(_){} }
-function clearTok(){ GC.token = null; GC.exp = 0; try{ localStorage.removeItem(TOK_KEY); }catch(_){} }
-const tokOk = () => !!GC.token && GC.exp > Date.now() + 60000;
+/* ---------- Google Calendar 직접 연결 (여러 구글 계정) ---------- */
+/* 계정: 'primary' = 사이트에 로그인한 계정, 그 밖에는 추가한 계정의 이메일 */
+const TOK_KEY = 'gcal.tokens.v2', EVC_KEY = 'gcal.cache.v1', CALS_KEY = 'gcal.cals.v2';
+let TOKS = {};
+function loadTok(){
+  try{ const o = JSON.parse(localStorage.getItem(TOK_KEY)); if(o && typeof o === 'object') TOKS = o; }catch(_){}
+  try{ const old = JSON.parse(localStorage.getItem('gcal.token.v1')); if(old && old.token && !TOKS.primary) TOKS.primary = old; localStorage.removeItem('gcal.token.v1'); }catch(_){}
+}
+function persistToks(){ try{ localStorage.setItem(TOK_KEY, JSON.stringify(TOKS)); }catch(_){} }
+function saveTokFor(key, token, sec){ TOKS[key] = { token, exp: Date.now() + (Number(sec) || 3600) * 1000 }; persistToks(); }
+function clearTokFor(key){ delete TOKS[key]; persistToks(); }
+const tokOkFor = key => !!(TOKS[key] && TOKS[key].token && TOKS[key].exp > Date.now() + 60000);
+const saveTok = (token, sec) => saveTokFor('primary', token, sec);
+const tokOk = () => tokOkFor('primary');
+function clearTok(){ TOKS = {}; persistToks(); }
+const anyTok = () => accounts().some(a => tokOkFor(a.key));
+function accounts(){
+  const u = auth.currentUser;
+  const list = [{ key: 'primary', email: (u && u.email) || '' }];
+  for(const e of (S.prefs.accounts || [])) if(e && e !== list[0].email) list.push({ key: e, email: e });
+  return list;
+}
+const acctLabel = a => a.key === 'primary' ? (a.email ? a.email + ' (로그인 계정)' : '로그인 계정') : a.email;
 function saveEvCache(){
   try{ localStorage.setItem(EVC_KEY, JSON.stringify([...S.gcal.events.values()].map(e => Object.assign({}, e, { start: e.start.getTime(), end: e.end.getTime() })))); }catch(_){}
 }
 function loadEvCache(){
-  try{ const c = JSON.parse(localStorage.getItem('gcal.cals.v1')); if(Array.isArray(c)) S.gcal.cals = c; }catch(_){}
+  try{ const c = JSON.parse(localStorage.getItem(CALS_KEY)); if(Array.isArray(c)) S.gcal.cals = c; }catch(_){}
   try{ const a = JSON.parse(localStorage.getItem(EVC_KEY)); if(Array.isArray(a)) for(const e of a){ if(e && e.id) S.gcal.events.set(e.id, Object.assign({}, e, { start: new Date(e.start), end: new Date(e.end) })); } }catch(_){}
 }
 function calProvider(){ const p = new firebase.auth.GoogleAuthProvider(); p.addScope(CAL_SCOPE); p.setCustomParameters({ prompt: 'select_account' }); return p; }
 let tokenClient = null;
 function gisReady(){ return !!(GOOGLE_CLIENT_ID && window.google && google.accounts && google.accounts.oauth2); }
-function requestTokenGIS(){
+function requestTokenGIS(hint, prompt){
   return new Promise((res, rej) => {
     if(!tokenClient) tokenClient = google.accounts.oauth2.initTokenClient({ client_id: GOOGLE_CLIENT_ID, scope: CAL_SCOPE, callback: () => {} });
     tokenClient.callback = r => (r && r.access_token) ? res(r) : rej(r);
     tokenClient.error_callback = e => rej(e);
-    const u = auth.currentUser;
-    tokenClient.requestAccessToken({ prompt: '', hint: u && u.email || undefined });
+    const o = { prompt: prompt || '' };
+    if(hint){ o.hint = hint; o.login_hint = hint; }
+    tokenClient.requestAccessToken(o);
   });
 }
+const CANCEL = ['auth/popup-closed-by-user', 'auth/cancelled-popup-request', 'popup_closed', 'popup_failed_to_open'];
+function connectFail(e){
+  const c = e && (e.code || e.type || e.error);
+  if(c === 'popup_failed_to_open') toast('팝업이 막혔어요. 브라우저에서 팝업을 허용해 주세요.');
+  else if(c === 'access_denied') toast('구글이 접근을 막았어요. 학교 계정이면 학교에서 이 앱을 막았을 수 있어요.');
+  else if(!CANCEL.includes(c)) toast('구글 캘린더에 연결하지 못했어요. 다시 눌러 주세요.');
+}
 /* 버튼을 눌렀을 때만 불러요 (브라우저가 팝업을 막지 않도록) */
-async function connectCalendar(){
+async function connectCalendar(key){
+  key = key || 'primary';
   if(!auth.currentUser) return;
+  const acct = accounts().find(a => a.key === key); if(!acct) return;
   S.gcal.busy = true; renderAll();
   try{
     if(gisReady()){
-      const r = await requestTokenGIS(); saveTok(r.access_token, r.expires_in);
-    } else {
+      const r = await requestTokenGIS(acct.email); saveTokFor(key, r.access_token, r.expires_in);
+    } else if(key === 'primary'){
       const r = await auth.currentUser.reauthenticateWithPopup(calProvider());
       const c = r && r.credential;
       if(!c || !c.accessToken) throw new Error('no_token');
       saveTok(c.accessToken, 3600);
-    }
-    S.gcal.status = 'loading'; S.gcal.code = null; S.gcal.busy = false;
+    } else { throw { code: 'no_gis' }; }
+    delete S.gcal.acctErr[key];
+    if(key === 'primary'){ S.gcal.status = 'loading'; S.gcal.code = null; }
+    S.gcal.busy = false;
     refreshGcal();
+  }catch(e){ S.gcal.busy = false; renderAll(); connectFail(e); }
+}
+/* 다른 구글 계정(예: 학교 계정) 추가 */
+async function addAccount(){
+  if(!auth.currentUser) return;
+  if(!gisReady()){ toast('계정 추가 준비가 아직 안 됐어요. (Client ID 설정 필요)'); return; }
+  S.gcal.busy = true; renderAll();
+  try{
+    const r = await requestTokenGIS('', 'select_account');
+    const tmp = '__new';
+    saveTokFor(tmp, r.access_token, r.expires_in);
+    let email = '';
+    try{
+      const u = new URL('https://www.googleapis.com/calendar/v3/users/me/calendarList'); u.searchParams.set('minAccessRole', 'owner');
+      const p = await gcalGet(u, tmp);
+      const pc = (p.items || []).find(c => c.primary);
+      email = pc ? pc.id : '';
+    } finally { clearTokFor(tmp); }
+    if(!email) throw { code: 'no_email' };
+    const known = accounts();
+    if(known.some(a => a.email === email)){ toast('이미 연결된 계정이에요.'); saveTokFor(known.find(a => a.email === email).key, r.access_token, r.expires_in); }
+    else {
+      saveTokFor(email, r.access_token, r.expires_in);
+      savePrefs(p => { p.accounts = (p.accounts || []).filter(x => x !== email).concat([email]); });
+      toast(email + ' 계정을 추가했어요.');
+    }
+    S.gcal.busy = false;
+    S.gcal.calsAt = 0; refreshGcal();
   }catch(e){
     S.gcal.busy = false; renderAll();
-    const c = e && (e.code || e.type || e.error);
-    if(c !== 'auth/popup-closed-by-user' && c !== 'auth/cancelled-popup-request' && c !== 'popup_closed') toast('구글 캘린더에 연결하지 못했어요. 다시 눌러 주세요.');
+    if(e && e.code === 'needs_token') toast('구글이 캘린더를 보여주지 않았어요. 권한 화면에서 캘린더에 체크했는지 확인해 주세요.');
+    else connectFail(e);
   }
+}
+function removeAccount(email){
+  if(!confirm(email + ' 계정 연결을 끊을까요? 그 계정의 일정이 달력에서 사라져요.')) return;
+  const t = TOKS[email];
+  if(t && t.token && window.google && google.accounts && google.accounts.oauth2) try{ google.accounts.oauth2.revoke(t.token, () => {}); }catch(_){}
+  clearTokFor(email); delete S.gcal.acctErr[email];
+  for(const [id, e] of S.gcal.events) if(e.acct === email) S.gcal.events.delete(id);
+  if(S.gcal.cals) S.gcal.cals = S.gcal.cals.filter(c => c.acct !== email);
+  savePrefs(p => { p.accounts = (p.accounts || []).filter(x => x !== email); if(Array.isArray(p.cals)) p.cals = p.cals.filter(id => (S.gcal.cals || []).some(c => c.id === id)); });
+  saveEvCache();
 }
 function startCalendar(){
   if(!auth.currentUser) return;
-  if(!tokOk()){ S.gcal.status = 'error'; S.gcal.code = 'needs_token'; renderAll(); return; }
-  if(!gRanges.length){ const r = baseRange(); queueFetch(r[0], r[1]); }
+  if(!tokOk()){ S.gcal.status = 'error'; S.gcal.code = 'needs_token'; }
+  if(anyTok() && !gRanges.length){ const r = baseRange(); queueFetch(r[0], r[1]); }
+  renderAll();
 }
-async function gcalPage(a, b, pageToken, calId){
+async function gcalPage(a, b, pageToken, calId, key){
   const u = new URL('https://www.googleapis.com/calendar/v3/calendars/' + encodeURIComponent(calId || 'primary') + '/events');
   u.searchParams.set('timeMin', parseYmd(a).toISOString());
   u.searchParams.set('timeMax', parseYmd(b).toISOString());
@@ -517,42 +588,58 @@ async function gcalPage(a, b, pageToken, calId){
   u.searchParams.set('orderBy', 'startTime');
   u.searchParams.set('maxResults', '250');
   if(pageToken) u.searchParams.set('pageToken', pageToken);
-  return gcalGet(u);
+  return gcalGet(u, key);
 }
-/* 내 계정에서 볼 수 있는 캘린더 목록 (내 캘린더 + 공유받은 캘린더) */
-async function loadCals(){
+/* 계정마다 볼 수 있는 캘린더 목록 (내 캘린더 + 공유받은 캘린더) */
+async function loadCalsFor(acct){
   const u = new URL('https://www.googleapis.com/calendar/v3/users/me/calendarList');
   u.searchParams.set('minAccessRole', 'reader');
   u.searchParams.set('maxResults', '250');
-  const p = await gcalGet(u);
+  const p = await gcalGet(u, acct.key);
   const items = Array.isArray(p.items) ? p.items : [];
-  S.gcal.cals = items.filter(c => c && c.id && !c.deleted).map(c => ({ id: c.id, name: String(c.summaryOverride || c.summary || c.id), primary: !!c.primary, selected: !!c.selected, color: c.backgroundColor || '' }))
+  return items.filter(c => c && c.id && !c.deleted).map(c => ({ id: c.id, name: String(c.summaryOverride || c.summary || c.id), primary: !!c.primary,
+    main: !!c.primary && acct.key === 'primary', selected: !!c.selected, color: c.backgroundColor || '', acct: acct.key }))
     .sort((x, y) => (y.primary - x.primary) || x.name.localeCompare(y.name));
-  try{ localStorage.setItem('gcal.cals.v1', JSON.stringify(S.gcal.cals)); }catch(_){}
+}
+function mergeCals(byAcct){
+  const out = [], seen = new Set();
+  for(const a of accounts()){
+    const list = byAcct[a.key] || (S.gcal.cals || []).filter(c => c.acct === a.key);
+    for(const c of list) if(!seen.has(c.id)){ seen.add(c.id); out.push(c); }
+  }
+  S.gcal.cals = out;
+  try{ localStorage.setItem(CALS_KEY, JSON.stringify(out)); }catch(_){}
 }
 const AUTO_SKIP = /#holiday@|#contacts@|#weather@|addressbook#/;
 function activeCals(){
   const cals = S.gcal.cals || [];
-  if(Array.isArray(S.prefs.cals)){ const want = new Set(S.prefs.cals); return cals.filter(c => want.has(c.id)); }
+  if(Array.isArray(S.prefs.cals)){
+    /* 새로 추가한 계정의 캘린더는 고른 적이 없으니 기본 규칙으로 보여줘요 */
+    const want = new Set(S.prefs.cals), decided = new Set(S.prefs.calsSeen || S.prefs.cals);
+    return cals.filter(c => want.has(c.id) || (!decided.has(c.id) && (c.primary || (c.selected && !AUTO_SKIP.test(c.id)))));
+  }
   return cals.filter(c => c.primary || (c.selected && !AUTO_SKIP.test(c.id)));
 }
 function setCalOn(cal, on){
   const now = activeCals().map(c => c.id).filter(id => id !== cal.id);
   if(on) now.push(cal.id);
-  savePrefs(p => { p.cals = now; });
-  if(on && tokOk()) refreshGcal();
+  savePrefs(p => { p.cals = now; p.calsSeen = (S.gcal.cals || []).map(c => c.id); });
+  if(on && tokOkFor(cal.acct)) refreshGcal();
 }
-async function gcalGet(u){
+async function gcalGet(u, key){
+  key = key || 'primary';
+  const t = TOKS[key];
+  if(!t || !t.token) throw { code: 'needs_token' };
   let r;
-  try{ r = await fetch(u, { headers: { Authorization: 'Bearer ' + GC.token } }); }
+  try{ r = await fetch(u, { headers: { Authorization: 'Bearer ' + t.token } }); }
   catch(_){ throw { code: 'server_unavailable', retryable: true }; }
   if(r.ok) return r.json();
   let reason = '';
   try{ const j = await r.json(); const er = j && j.error; reason = JSON.stringify(er || ''); }catch(_){}
-  if(r.status === 401){ clearTok(); throw { code: 'needs_token' }; }
+  if(r.status === 401){ clearTokFor(key); throw { code: 'needs_token' }; }
   if(r.status === 403){
     if(/accessNotConfigured|SERVICE_DISABLED|has not been used/i.test(reason)) throw { code: 'api_disabled' };
-    if(/insufficient|ACCESS_TOKEN_SCOPE/i.test(reason)){ clearTok(); throw { code: 'consent_required' }; }
+    if(/insufficient|ACCESS_TOKEN_SCOPE/i.test(reason)){ clearTokFor(key); throw { code: 'consent_required' }; }
     if(/rateLimit|quota/i.test(reason)) throw { code: 'server_unavailable', retryable: true };
     throw { code: 'tool_error' };
   }
@@ -562,30 +649,47 @@ async function gcalGet(u){
 function gridRange(m){ const first = new Date(m.getFullYear(), m.getMonth(), 1); const s = ymd(first); const start = addDays(s, -first.getDay()); return [start, addDays(start, 42)]; }
 function baseRange(){ const g = gridRange(S.month); const a = addDays(TODAY(), -21), b = addDays(TODAY(), 75); return [g[0] < a ? g[0] : a, g[1] > b ? g[1] : b]; }
 const STOP = ['needs_token','consent_required','api_disabled'];
-async function fetchRange(a, b, refresh, retried){
-  if(!tokOk()){ S.gcal.status = 'error'; S.gcal.code = 'needs_token'; renderAll(); return; }
-  S.gcal.busy = true; if(S.gcal.status !== 'ok') S.gcal.status = 'loading'; renderAll();
-  try{
-    if(!S.gcal.cals || refresh) await loadCals();
-    const cals = activeCals();
-    const got = [];
-    for(const cal of cals){
-      let token = null, n = 0;
-      try{
-        do{
-          const p = await gcalPage(a, b, token, cal.id);
-          if(Array.isArray(p.items)) for(const raw of p.items){ const e = normEvent(raw, cal); if(e) got.push(e); }
-          token = p.nextPageToken; n++;
-        } while(token && n < 6);
-      }catch(err){
-        /* 공유가 끊긴 캘린더 하나 때문에 전체가 멈추지 않도록 건너뛰어요 */
-        if(err && err.code === 'tool_error' && !cal.primary) continue;
-        throw err;
-      }
+async function fetchAcct(acct, a, b, refresh, got){
+  let cals = (S.gcal.cals || []).filter(c => c.acct === acct.key);
+  const fresh = {};
+  if(!cals.length || refresh){ cals = await loadCalsFor(acct); fresh[acct.key] = cals; }
+  const act = new Set(activeCals().map(c => c.id));
+  if(fresh[acct.key]){ mergeCals(fresh); act.clear(); activeCals().forEach(c => act.add(c.id)); }
+  for(const cal of (S.gcal.cals || []).filter(c => c.acct === acct.key && act.has(c.id))){
+    let token = null, n = 0;
+    try{
+      do{
+        const p = await gcalPage(a, b, token, cal.id, acct.key);
+        if(Array.isArray(p.items)) for(const raw of p.items){ const e = normEvent(raw, cal); if(e){ e.acct = acct.key; got.push(e); } }
+        token = p.nextPageToken; n++;
+      } while(token && n < 6);
+    }catch(err){
+      /* 공유가 끊긴 캘린더 하나 때문에 전체가 멈추지 않도록 건너뛰어요 */
+      if(err && err.code === 'tool_error' && !cal.primary) continue;
+      throw err;
     }
-    for(const [id, e] of S.gcal.events) if(evFirst(e) >= a && evFirst(e) < b) S.gcal.events.delete(id);
-    /* 두 계정에 같은 초대가 들어 있으면 한 번만 보여줘요 (내 캘린더 쪽을 남김) */
+  }
+}
+async function fetchRange(a, b, refresh, retried){
+  const accts = accounts().filter(x => tokOkFor(x.key));
+  if(!tokOk()){ S.gcal.status = 'error'; S.gcal.code = 'needs_token'; }
+  if(!accts.length){ renderAll(); return; }
+  S.gcal.busy = true; if(S.gcal.status !== 'ok' && tokOk()) S.gcal.status = 'loading'; renderAll();
+  const got = [], done = new Set();
+  let primaryErr = null;
+  for(const acct of accts){
+    try{ await fetchAcct(acct, a, b, refresh, got); done.add(acct.key); delete S.gcal.acctErr[acct.key]; }
+    catch(err){
+      const code = (err && err.code) || 'upstream_error';
+      if(err && err.retryable && !retried){ await sleep(800 + Math.random()*700); S.gcal.busy = false; return fetchRange(a, b, refresh, true); }
+      if(acct.key === 'primary') primaryErr = code; else S.gcal.acctErr[acct.key] = code;
+    }
+  }
+  if(done.size){
+    for(const [id, e] of S.gcal.events) if(evFirst(e) >= a && evFirst(e) < b && done.has(e.acct || 'primary')) S.gcal.events.delete(id);
+    /* 여러 계정·캘린더에 같은 초대가 들어 있으면 한 번만 보여줘요 (로그인 계정 쪽을 남김) */
     const seen = new Set();
+    for(const e of S.gcal.events.values()) if(e.uid) seen.add(e.uid + '@' + e.start.getTime());
     for(const e of got){
       const k = e.uid ? e.uid + '@' + e.start.getTime() : '';
       if(k && seen.has(k)) continue;
@@ -593,18 +697,15 @@ async function fetchRange(a, b, refresh, retried){
       S.gcal.events.set(e.id, e);
     }
     if(!gRanges.some(r => r[0] === a && r[1] === b)) gRanges.push([a, b]);
-    S.gcal.status = 'ok'; S.gcal.code = null;
     saveEvCache();
-  }catch(err){
-    const code = (err && err.code) || 'upstream_error';
-    if(err && err.retryable && !retried){ await sleep(800 + Math.random()*700); return fetchRange(a, b, refresh, true); }
-    S.gcal.status = 'error'; S.gcal.code = code;
   }
+  if(primaryErr){ S.gcal.status = 'error'; S.gcal.code = primaryErr; }
+  else if(done.has('primary')){ S.gcal.status = 'ok'; S.gcal.code = null; }
   S.gcal.busy = false; renderAll();
 }
 function queueFetch(a, b, refresh){ gQueue = gQueue.then(() => fetchRange(a, b, refresh)); return gQueue; }
 function ensureMonth(){
-  if(!auth.currentUser || !tokOk() || (S.gcal.status === 'error' && STOP.includes(S.gcal.code))) return;
+  if(!auth.currentUser || !anyTok() || (S.gcal.status === 'error' && S.gcal.code === 'api_disabled')) return;
   const r = gridRange(S.month);
   if(!gRanges.some(x => x[0] <= r[0] && x[1] >= r[1])) queueFetch(r[0], r[1]);
 }
@@ -635,22 +736,38 @@ function gcalStatusEl(){
     const needConnect = err && (g.code === 'needs_token' || g.code === 'consent_required');
     const label = needConnect ? '캘린더 연결' : (err ? '다시 불러오기' : '새로고침');
     btn = h('button', { class: needConnect ? 'btn' : 'btn-text small', type: 'button', disabled: g.busy, onclick: () => {
-      if(needConnect || !tokOk()){ connectCalendar(); return; }
+      if(needConnect || !tokOk()){ connectCalendar('primary'); return; }
       refreshGcal();
     } }, g.busy ? '불러오는 중…' : label);
   }
-  const cals = S.gcal.cals || [];
-  const pickBtn = cals.length > 1 ? h('button', { class: 'btn-text small', type: 'button', 'aria-expanded': String(!!S.showCals),
-    onclick: () => { S.showCals = !S.showCals; renderAll(); } }, S.showCals ? '캘린더 고르기 닫기' : '캘린더 고르기') : null;
+  /* 추가한 계정 중 연결이 끊긴 계정 */
+  const extra = accounts().filter(a => a.key !== 'primary' && !tokOkFor(a.key));
+  const extraBtns = auth.currentUser ? extra.map(a => h('button', { class: 'btn', type: 'button', disabled: g.busy, onclick: () => connectCalendar(a.key) }, a.email + ' 연결')) : [];
+  const pickBtn = auth.currentUser ? h('button', { class: 'btn-text small', type: 'button', 'aria-expanded': String(!!S.showCals),
+    onclick: () => { S.showCals = !S.showCals; renderAll(); } }, S.showCals ? '캘린더 설정 닫기' : '캘린더 설정') : null;
   let picker = null;
-  if(S.showCals && cals.length){
+  if(S.showCals && auth.currentUser){
     const on = new Set(activeCals().map(c => c.id));
-    picker = h('div', { class: 'calpick' }, cals.map(c => h('label', { class: 'calrow' },
-      h('input', { type: 'checkbox', checked: on.has(c.id), onchange: e => setCalOn(c, e.target.checked) }),
-      h('span', { class: 'cdot', style: 'background:' + (c.color || 'var(--event)') }),
-      h('span', { class: 'cname' }, c.name + (c.primary ? ' (내 캘린더)' : '')))));
+    const cals = S.gcal.cals || [];
+    picker = h('div', { class: 'calpick' },
+      accounts().map(a => {
+        const mine = cals.filter(c => c.acct === a.key);
+        const ok = tokOkFor(a.key), e = a.key === 'primary' ? (err ? g.code : null) : S.gcal.acctErr[a.key];
+        return h('div', { class: 'acct' },
+          h('div', { class: 'acct-head' },
+            h('span', { class: 'acct-name' }, acctLabel(a)),
+            !ok ? h('button', { class: 'btn-text small', type: 'button', onclick: () => connectCalendar(a.key) }, '연결') : null,
+            a.key !== 'primary' ? h('button', { class: 'btn-text small danger', type: 'button', onclick: () => removeAccount(a.email) }, '연결 끊기') : null),
+          e === 'consent_required' ? h('p', { class: 'muted small', style: 'margin:2px 0' }, '캘린더 권한에 체크하지 않았어요. 연결을 다시 눌러 주세요.') : null,
+          mine.length ? mine.map(c => h('label', { class: 'calrow' },
+            h('input', { type: 'checkbox', checked: on.has(c.id), onchange: ev => setCalOn(c, ev.target.checked) }),
+            h('span', { class: 'cdot', style: 'background:' + (c.color || 'var(--event)') }),
+            h('span', { class: 'cname' }, c.name + (c.primary ? ' (기본)' : ''))))
+          : h('p', { class: 'muted small', style: 'margin:2px 0 6px' }, ok ? '불러오는 중…' : '연결하면 캘린더 목록이 보여요.'));
+      }),
+      h('button', { class: 'btn', type: 'button', style: 'margin-top:8px', disabled: g.busy, onclick: addAccount }, '+ 다른 구글 계정 추가'));
   }
-  return h('div', null, h('div', { class: 'gstatus' + (err ? ' err' : '') }, h('span', null, gcalMsg()), btn, pickBtn), picker);
+  return h('div', null, h('div', { class: 'gstatus' + (err ? ' err' : '') }, h('span', null, gcalMsg()), btn, extraBtns, pickBtn), picker);
 }
 
 /* ---------- dedupe + trips ---------- */
@@ -802,8 +919,8 @@ async function signIn(){
 }
 function signOutAll(){
   stopDb(); clearTok();
-  try{ localStorage.removeItem(EVC_KEY); localStorage.removeItem('gcal.cals.v1'); }catch(_){}
-  S.gcal.cals = null; S.showCals = false;
+  try{ localStorage.removeItem(EVC_KEY); localStorage.removeItem(CALS_KEY); }catch(_){}
+  S.gcal.cals = null; S.gcal.acctErr = {}; S.showCals = false;
   S.gcal.events.clear(); gRanges = []; S.gcal.status = 'loading'; S.gcal.code = null;
   S.tasks = {}; S.projects = {}; S.braindump = { text: '' }; S.prefs = normPrefs(null);
   auth.signOut();
@@ -1451,7 +1568,8 @@ document.addEventListener('visibilitychange', () => {
   if(document.visibilityState !== 'visible' || !auth.currentUser) return;
   if(Date.now() - lastRefresh < 5 * 60000) { renderAll(); return; }
   lastRefresh = Date.now();
-  if(tokOk()) refreshGcal(); else { S.gcal.status = 'error'; S.gcal.code = 'needs_token'; renderAll(); }
+  if(!tokOk()){ S.gcal.status = 'error'; S.gcal.code = 'needs_token'; }
+  if(anyTok()) refreshGcal(); else renderAll();
 });
 setInterval(() => { const a = document.activeElement; if(a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA')) return; renderAll(); }, 60000);
 if('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
