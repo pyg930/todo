@@ -71,6 +71,7 @@ input[type=text]{width:100%}
 .top>*,.daygrid>*,.side>*{min-width:0}
 .tt,.item button.it,.trow .tx,.evcard .t{overflow-wrap:anywhere}
 html,body{overflow-x:hidden}
+@supports (overflow:clip){html,body{overflow-x:clip}}
 
 /* calendar */
 .cal-head{display:flex;align-items:center;gap:10px;margin-bottom:14px}
@@ -292,7 +293,8 @@ html,body{overflow-x:hidden}
 .calbtn.alert::after{content:"";position:absolute;top:4px;right:4px;width:8px;height:8px;border-radius:50%;background:var(--high)}
 @media (min-width:1080px){
   .main-app{max-width:1480px}
-  .top{grid-template-columns:200px minmax(0,1.7fr) minmax(270px,1fr)}
+  .layout{display:grid;grid-template-columns:200px minmax(0,1fr);gap:18px;align-items:start}
+  .layout>*{min-width:0}
   .calpanel{position:sticky;top:16px;max-height:calc(100vh - 32px);overflow:auto}
   .only-narrow{display:none!important}
 }
@@ -1152,8 +1154,10 @@ function renderBanner(){
 function renderMain(){
   return h('main', { class: 'app main-app' },
     renderBanner(),
-    h('div', { class: 'top' }, renderCalPanel(), renderCalendar(), h('div', { class: 'side' }, renderDeadlines(), renderDayPanel(), renderTrips())),
-    renderMemo(), storageNote(), accountBar());
+    h('div', { class: 'layout' }, renderCalPanel(),
+      h('div', { class: 'content' },
+        h('div', { class: 'top' }, renderCalendar(), h('div', { class: 'side' }, renderDeadlines(), renderDayPanel(), renderTrips())),
+        renderMemo(), storageNote(), accountBar())));
 }
 function dayIndex(){
   const idx = {}, get = d => idx[d] || (idx[d] = { ev: 0, tk: 0, due: false, trip: false, lbls: [] });
