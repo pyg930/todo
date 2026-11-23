@@ -290,13 +290,13 @@ html,body{overflow-x:hidden}
 @keyframes spin{to{transform:rotate(360deg)}}
 .calbtn{position:relative}
 .calbtn.alert::after{content:"";position:absolute;top:4px;right:4px;width:8px;height:8px;border-radius:50%;background:var(--high)}
-@media (min-width:1180px){
+@media (min-width:1080px){
   .main-app{max-width:1480px}
-  .top{grid-template-columns:220px minmax(0,1.7fr) minmax(280px,1fr)}
+  .top{grid-template-columns:200px minmax(0,1.7fr) minmax(270px,1fr)}
   .calpanel{position:sticky;top:16px;max-height:calc(100vh - 32px);overflow:auto}
   .only-narrow{display:none!important}
 }
-@media (max-width:1179px){
+@media (max-width:1079px){
   .calpanel{position:fixed;left:0;top:0;bottom:0;width:min(320px,86vw);z-index:30;border-radius:0 16px 16px 0;overflow:auto;
     padding-top:calc(16px + env(safe-area-inset-top,0px));padding-bottom:calc(16px + env(safe-area-inset-bottom,0px));transform:translateX(-105%);visibility:hidden;box-shadow:0 10px 40px rgba(0,0,0,.18)}
   .calpanel.open{transform:none;visibility:visible}
@@ -932,7 +932,7 @@ function route(){
   window.scrollTo(0, 0); renderAll();
 }
 window.addEventListener('hashchange', route);
-document.addEventListener('keydown', e => { if(e.key === 'Escape' && S.showCals && window.innerWidth < 1180){ S.showCals = false; renderAll(); } });
+document.addEventListener('keydown', e => { if(e.key === 'Escape' && S.showCals && window.innerWidth < 1080){ S.showCals = false; renderAll(); } });
 
 /* ================= render root ================= */
 let CTX = null;
@@ -1627,7 +1627,7 @@ document.addEventListener('visibilitychange', () => {
   if(anyTok()) refreshGcal(); else renderAll();
 });
 setInterval(() => { const a = document.activeElement; if(a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA')) return; renderAll(); }, 60000);
-if('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+if('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => {});
 init();
 </script>
 </body>
