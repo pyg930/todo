@@ -274,6 +274,35 @@ html,body{overflow-x:hidden}
 .account .who{margin-right:auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 
+/* calendar side panel */
+.calpanel{padding:14px}
+.calpanel .head{margin-bottom:4px}
+.calstate{display:flex;align-items:center;gap:6px;margin:0 0 8px;font-size:13px;color:var(--muted)}
+.calstate.err{color:var(--high)}
+.sdot{width:8px;height:8px;border-radius:50%;background:var(--muted);flex:none}
+.sdot.ok{background:var(--accent)} .sdot.bad{background:var(--high)}
+.calpanel .calpick{margin-top:0;border:none;padding:0;background:none}
+.calpanel .acct{padding:6px 0 8px}
+.acct-connect{width:100%;margin:4px 0 6px}
+.calrow.stale{opacity:.6}
+.addacct{padding:8px 0 0;margin-top:4px}
+.spin{display:inline-block;animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.calbtn{position:relative}
+.calbtn.alert::after{content:"";position:absolute;top:4px;right:4px;width:8px;height:8px;border-radius:50%;background:var(--high)}
+@media (min-width:1180px){
+  .main-app{max-width:1480px}
+  .top{grid-template-columns:220px minmax(0,1.7fr) minmax(280px,1fr)}
+  .calpanel{position:sticky;top:16px;max-height:calc(100vh - 32px);overflow:auto}
+  .only-narrow{display:none!important}
+}
+@media (max-width:1179px){
+  .calpanel{position:fixed;left:0;top:0;bottom:0;width:min(320px,86vw);z-index:30;border-radius:0 16px 16px 0;overflow:auto;
+    padding-top:calc(16px + env(safe-area-inset-top,0px));padding-bottom:calc(16px + env(safe-area-inset-bottom,0px));transform:translateX(-105%);visibility:hidden;box-shadow:0 10px 40px rgba(0,0,0,.18)}
+  .calpanel.open{transform:none;visibility:visible}
+  .scrim{position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:29}
+}
+@media (prefers-reduced-motion: reduce){ .spin{animation:none} }
 @media (max-width:900px){
   .top,.daygrid{grid-template-columns:minmax(0,1fr)}
 }
@@ -728,6 +757,13 @@ function gcalMsg(){
     default: return '구글 캘린더를 불러오지 못했어요.';
   }
 }
+/* 연결이 필요한 계정이 있는지 */
+function calNeedsAttention(){
+  const g = S.gcal;
+  if(!auth.currentUser) return false;
+  return (g.status === 'error') || accounts().some(a => a.key !== 'primary' && !tokOkFor(a.key));
+}
+/* 상태 한 줄 + 연결 버튼 (일별 화면, 휴대폰 달력 아래에서 사용) */
 function gcalStatusEl(){
   const g = S.gcal;
   const err = g.status === 'error';
@@ -740,34 +776,50 @@ function gcalStatusEl(){
       refreshGcal();
     } }, g.busy ? '불러오는 중…' : label);
   }
-  /* 추가한 계정 중 연결이 끊긴 계정 */
-  const extra = accounts().filter(a => a.key !== 'primary' && !tokOkFor(a.key));
-  const extraBtns = auth.currentUser ? extra.map(a => h('button', { class: 'btn', type: 'button', disabled: g.busy, onclick: () => connectCalendar(a.key) }, a.email + ' 연결')) : [];
-  const pickBtn = auth.currentUser ? h('button', { class: 'btn-text small', type: 'button', 'aria-expanded': String(!!S.showCals),
-    onclick: () => { S.showCals = !S.showCals; renderAll(); } }, S.showCals ? '캘린더 설정 닫기' : '캘린더 설정') : null;
-  let picker = null;
-  if(S.showCals && auth.currentUser){
-    const on = new Set(activeCals().map(c => c.id));
-    const cals = S.gcal.cals || [];
-    picker = h('div', { class: 'calpick' },
-      accounts().map(a => {
-        const mine = cals.filter(c => c.acct === a.key);
-        const ok = tokOkFor(a.key), e = a.key === 'primary' ? (err ? g.code : null) : S.gcal.acctErr[a.key];
-        return h('div', { class: 'acct' },
-          h('div', { class: 'acct-head' },
-            h('span', { class: 'acct-name' }, acctLabel(a)),
-            !ok ? h('button', { class: 'btn-text small', type: 'button', onclick: () => connectCalendar(a.key) }, '연결') : null,
-            a.key !== 'primary' ? h('button', { class: 'btn-text small danger', type: 'button', onclick: () => removeAccount(a.email) }, '연결 끊기') : null),
-          e === 'consent_required' ? h('p', { class: 'muted small', style: 'margin:2px 0' }, '캘린더 권한에 체크하지 않았어요. 연결을 다시 눌러 주세요.') : null,
-          mine.length ? mine.map(c => h('label', { class: 'calrow' },
-            h('input', { type: 'checkbox', checked: on.has(c.id), onchange: ev => setCalOn(c, ev.target.checked) }),
-            h('span', { class: 'cdot', style: 'background:' + (c.color || 'var(--event)') }),
-            h('span', { class: 'cname' }, c.name + (c.primary ? ' (기본)' : ''))))
-          : h('p', { class: 'muted small', style: 'margin:2px 0 6px' }, ok ? '불러오는 중…' : '연결하면 캘린더 목록이 보여요.'));
-      }),
-      h('button', { class: 'btn', type: 'button', style: 'margin-top:8px', disabled: g.busy, onclick: addAccount }, '+ 다른 구글 계정 추가'));
-  }
-  return h('div', null, h('div', { class: 'gstatus' + (err ? ' err' : '') }, h('span', null, gcalMsg()), btn, extraBtns, pickBtn), picker);
+  const extra = auth.currentUser ? accounts().filter(a => a.key !== 'primary' && !tokOkFor(a.key)) : [];
+  const extraBtns = extra.map(a => h('button', { class: 'btn', type: 'button', disabled: g.busy, onclick: () => connectCalendar(a.key) }, a.email + ' 연결'));
+  return h('div', { class: 'gstatus' + (err ? ' err' : '') }, h('span', null, gcalMsg()), btn, extraBtns);
+}
+/* 계정별 캘린더 목록 */
+function calListEl(){
+  const g = S.gcal, err = g.status === 'error';
+  const on = new Set(activeCals().map(c => c.id));
+  const cals = g.cals || [];
+  return h('div', { class: 'calpick' },
+    accounts().map(a => {
+      const mine = cals.filter(c => c.acct === a.key);
+      const ok = tokOkFor(a.key), e = a.key === 'primary' ? (err ? g.code : null) : g.acctErr[a.key];
+      return h('div', { class: 'acct' },
+        h('div', { class: 'acct-head' },
+          h('span', { class: 'acct-name', title: a.email }, a.key === 'primary' ? (a.email || '로그인 계정') : a.email),
+          a.key !== 'primary' ? h('button', { class: 'btn-text small danger', type: 'button', title: '이 계정 연결 끊기', 'aria-label': a.email + ' 연결 끊기', onclick: () => removeAccount(a.email) }, '끊기') : null),
+        !ok ? h('button', { class: 'btn acct-connect', type: 'button', disabled: g.busy, onclick: () => connectCalendar(a.key) }, '연결하기') : null,
+        e === 'consent_required' ? h('p', { class: 'muted small', style: 'margin:2px 0' }, '캘린더 권한에 체크하지 않았어요. 연결을 다시 눌러 주세요.') : null,
+        mine.length ? mine.map(c => h('label', { class: 'calrow' + (ok ? '' : ' stale') },
+          h('input', { type: 'checkbox', checked: on.has(c.id), onchange: ev => setCalOn(c, ev.target.checked) }),
+          h('span', { class: 'cdot', style: 'background:' + (c.color || 'var(--event)') }),
+          h('span', { class: 'cname', title: c.name }, c.name)))
+        : h('p', { class: 'muted small', style: 'margin:2px 0 6px' }, ok ? '불러오는 중…' : '연결하면 캘린더 목록이 보여요.'));
+    }),
+    h('button', { class: 'btn-text small addacct', type: 'button', disabled: g.busy, onclick: addAccount }, '+ 다른 구글 계정 추가'));
+}
+/* 달력 왼쪽 캘린더 칸 (휴대폰에서는 왼쪽에서 열리는 서랍) */
+function renderCalPanel(){
+  if(!auth.currentUser) return null;
+  const g = S.gcal, err = g.status === 'error';
+  const close = () => { S.showCals = false; renderAll(); };
+  const state = g.busy || g.status === 'loading' ? '불러오는 중…' : g.status === 'ok' ? '연결됨' : (g.code === 'needs_token' || g.code === 'consent_required') ? '연결이 필요해요' : gcalMsg();
+  return [
+    S.showCals ? h('div', { class: 'scrim only-narrow', onclick: close }) : null,
+    h('aside', { class: 'card calpanel' + (S.showCals ? ' open' : ''), 'aria-label': '캘린더' },
+      h('div', { class: 'head' },
+        h('h2', { class: 'grow' }, '캘린더'),
+        h('button', { class: 'icon-btn', type: 'button', 'aria-label': '캘린더 새로고침', title: '새로고침', disabled: g.busy,
+          onclick: () => { if(!tokOk()){ connectCalendar('primary'); return; } refreshGcal(); } }, h('span', { class: g.busy ? 'spin' : '' }, '↻')),
+        h('button', { class: 'icon-btn only-narrow', type: 'button', 'aria-label': '닫기', onclick: close }, '×')),
+      h('p', { class: 'calstate' + (err ? ' err' : '') }, h('span', { class: 'sdot' + (g.status === 'ok' && !err ? ' ok' : err ? ' bad' : '') }), state),
+      calListEl())
+  ];
 }
 
 /* ---------- dedupe + trips ---------- */
@@ -880,6 +932,7 @@ function route(){
   window.scrollTo(0, 0); renderAll();
 }
 window.addEventListener('hashchange', route);
+document.addEventListener('keydown', e => { if(e.key === 'Escape' && S.showCals && window.innerWidth < 1180){ S.showCals = false; renderAll(); } });
 
 /* ================= render root ================= */
 let CTX = null;
@@ -1097,9 +1150,9 @@ function renderBanner(){
       h('p', { class: 'bsub' }, b.sub)));
 }
 function renderMain(){
-  return h('main', { class: 'app' },
+  return h('main', { class: 'app main-app' },
     renderBanner(),
-    h('div', { class: 'top' }, renderCalendar(), h('div', { class: 'side' }, renderDeadlines(), renderDayPanel(), renderTrips())),
+    h('div', { class: 'top' }, renderCalPanel(), renderCalendar(), h('div', { class: 'side' }, renderDeadlines(), renderDayPanel(), renderTrips())),
     renderMemo(), storageNote(), accountBar());
 }
 function dayIndex(){
@@ -1145,6 +1198,8 @@ function renderCalendar(){
   }
   return h('section', { class: 'card', 'aria-label': '달력' },
     h('div', { class: 'cal-head' },
+      auth.currentUser ? h('button', { class: 'icon-btn only-narrow calbtn' + (calNeedsAttention() ? ' alert' : ''), type: 'button', 'aria-label': '캘린더 목록 열기', 'aria-expanded': String(!!S.showCals),
+        onclick: () => { S.showCals = true; renderAll(); } }, '☰') : null,
       h('h1', { class: 'cal-title' }, (mo+1) + '월'), h('span', { class: 'cal-year' }, m.getFullYear() + '년'),
       h('span', { class: 'grow' }),
       h('button', { class: 'btn', type: 'button', onclick: () => { const n = new Date(); S.month = new Date(n.getFullYear(), n.getMonth(), 1); S.selected = TODAY(); ensureMonth(); renderAll(); } }, '오늘'),
@@ -1155,7 +1210,7 @@ function renderCalendar(){
       h('span', null, h('i', { class: 'dot ev' }), '구글 일정'), h('span', null, h('i', { class: 'dot tk' }), '내 할 일'),
       h('span', null, h('i', { class: 'dot due' }), '마감'), h('span', null, h('i', { class: 'bar' }), '여행'),
       h('span', null, '날짜를 한 번 더 누르면 자세히 보여요')),
-    gcalStatusEl());
+    calNeedsAttention() ? h('div', { class: 'only-narrow' }, gcalStatusEl()) : null);
 }
 function deadlineItems(){
   const today = TODAY(), items = [];
